@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isAdmin() { return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // --- User Profile ---
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.uid == request.auth.uid 
+          && data.email is string && data.email.size() < 256
+          && data.role in ['user', 'admin']
+          && data.createdAt is timestamp;
+      }
+      
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId 
+        && isValidUser(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'role']) // Simplified for now
+        && (isAdmin() || incoming().role == existing().role); // Only admin can change role
+    }
+
+    // --- Admins Collection (Security Only) ---
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+    }
+
+    // --- Tools ---
+    match /tools/{toolId} {
+      function isValidTool(data) {
+        return data.name is string && data.name.size() < 100
+          && data.slug is string && data.slug.size() < 100
+          && data.category is string;
+      }
+      
+      allow read: if true; // Publicly readable
+      allow write: if isAdmin() && isValidTool(incoming());
+    }
+
+    // --- Blog Posts ---
+    match /blogPosts/{postId} {
+      function isValidBlogPost(data) {
+        return data.title is string && data.title.size() < 200
+          && data.slug is string && data.slug.size() < 200
+          && data.content is string && data.content.size() < 50000;
+      }
+
+      allow read: if true;
+      allow write: if isAdmin() && isValidBlogPost(incoming());
+    }
+  }
+}

@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isAdmin() { return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+
+    // --- User Profile ---
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) 
+          && data.keys().size() == 4
+          && data.uid == request.auth.uid 
+          && data.email is string && data.email.size() < 256
+          && data.role in ['user', 'admin']
+          && data.createdAt == request.time;
+      }
+      
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin()) && isValidId(userId);
+      allow list: if isAdmin();
+      allow create: if isVerified() && isOwner(userId) && isValidUser(incoming()) && isValidId(userId);
+      allow update: if isVerified() && isOwner(userId) && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email'])
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt;
+    }
+
+    // --- Admins Collection (Security Only) ---
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId && isValidId(adminId);
+    }
+
+    // --- Tools ---
+    match /tools/{toolId} {
+      function isValidTool(data) {
+        return data.keys().hasAll(['id', 'name', 'slug', 'category', 'description', 'icon', 'popular', 'featured', 'usageCount', 'createdAt'])
+          && data.name is string && data.name.size() < 100
+          && data.slug is string && data.slug.size() < 100
+          && data.category is string
+          && data.usageCount is number
+          && data.createdAt is timestamp;
+      }
+      
+      allow read: if true;
+      allow create: if isAdmin() && isValidTool(incoming()) && isValidId(toolId);
+      allow update: if (isAdmin() && isValidTool(incoming()) && isValidId(toolId))
+        || (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['usageCount']));
+    }
+
+    // --- Blog Posts ---
+    match /blogPosts/{postId} {
+      function isValidBlogPost(data) {
+        return data.title is string && data.title.size() < 200
+          && data.slug is string && data.slug.size() < 200
+          && data.content is string && data.content.size() < 50000
+          && data.authorId == request.auth.uid
+          && data.publishedAt == request.time;
+      }
+
+      allow read: if true;
+      allow create: if isAdmin() && isValidBlogPost(incoming()) && isValidId(postId);
+      allow update: if isAdmin() && isValidBlogPost(incoming()) && isValidId(postId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'excerpt', 'featuredImage', 'tags', 'updatedAt', 'seoTitle', 'seoDescription']);
+    }
+  }
+}
